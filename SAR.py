@@ -538,23 +538,82 @@ class TextClassifier:
 
         return results
 
+    def cache_reference_data(self):
+        """Pre-compute and cache the normalized embeddings tensor and per-data
+        subcentroid assignments so that get_nearest_subcentroids doesn't redo
+        this O(N*D*K*M) work on every call."""
+        embeddings_tensor = torch.tensor(
+            np.stack(self.embeddings), dtype=torch.float
+        ).to(self.device)
+        embeddings_tensor = self.subcentroids_head.feat_norm(embeddings_tensor)
+        embeddings_tensor = self.subcentroids_head.l2_normalize(embeddings_tensor)
+
+        self.subcentroids_head.prototypes.data.copy_(
+            self.subcentroids_head.l2_normalize(self.subcentroids_head.prototypes.data)
+        )
+
+        with torch.no_grad():
+            similarities = torch.einsum(
+                "nd,kmd->nmk", embeddings_tensor, self.subcentroids_head.prototypes
+            )
+            max_similarities, data_subcentroid_indices = torch.max(similarities, dim=1)
+            _, data_class_indices = torch.max(max_similarities, dim=1)
+
+        # Store per-data-point (class_idx, subcentroid_idx) assignments
+        self._cached_data_assignments = [
+            (
+                data_class_indices[i].item(),
+                data_subcentroid_indices[i, data_class_indices[i]].item(),
+            )
+            for i in range(data_class_indices.shape[0])
+        ]
+        self._cached = True
+        logger.info("Cached reference data assignments for fast routing.")
+
     def get_nearest_subcentroids(self, text, embedding, n=4):
         # Get embedding
         embedding_tensor = (
             torch.tensor(embedding, dtype=torch.float).unsqueeze(0).to(self.device)
         )
-        embeddings_tensor = torch.tensor(
-            np.stack(self.embeddings), dtype=torch.float
-        ).to(self.device)
 
-        # Normalize features and Ensure prototypes are normalized
+        # Normalize input
         embedding_tensor = self.subcentroids_head.feat_norm(embedding_tensor)
         embedding_tensor = self.subcentroids_head.l2_normalize(embedding_tensor)
-        embeddings_tensor = self.subcentroids_head.feat_norm(embeddings_tensor)
-        embeddings_tensor = self.subcentroids_head.l2_normalize(embeddings_tensor)
-        self.subcentroids_head.prototypes.data.copy_(
-            self.subcentroids_head.l2_normalize(self.subcentroids_head.prototypes.data)
-        )
+
+        if not getattr(self, "_cached", False):
+            # Fallback: compute everything from scratch (original behavior)
+            embeddings_tensor = torch.tensor(
+                np.stack(self.embeddings), dtype=torch.float
+            ).to(self.device)
+            embeddings_tensor = self.subcentroids_head.feat_norm(embeddings_tensor)
+            embeddings_tensor = self.subcentroids_head.l2_normalize(embeddings_tensor)
+            self.subcentroids_head.prototypes.data.copy_(
+                self.subcentroids_head.l2_normalize(
+                    self.subcentroids_head.prototypes.data
+                )
+            )
+            with torch.no_grad():
+                similarities = torch.einsum(
+                    "nd,kmd->nmk", embeddings_tensor, self.subcentroids_head.prototypes
+                )
+                max_similarities, data_subcentroid_indices = torch.max(
+                    similarities, dim=1
+                )
+                _, data_class_indices = torch.max(max_similarities, dim=1)
+            data_assignments = [
+                (
+                    data_class_indices[i].item(),
+                    data_subcentroid_indices[i, data_class_indices[i]].item(),
+                )
+                for i in range(data_class_indices.shape[0])
+            ]
+        else:
+            self.subcentroids_head.prototypes.data.copy_(
+                self.subcentroids_head.l2_normalize(
+                    self.subcentroids_head.prototypes.data
+                )
+            )
+            data_assignments = self._cached_data_assignments
 
         with torch.no_grad():
             # Calculate similarity with all subcentroids
@@ -568,40 +627,18 @@ class TextClassifier:
         topn_subcentroid_indices = flat_indices // masks.shape[1]  # Subcentroid indices
         topn_class_indices = flat_indices % masks.shape[1]  # Class indices
 
-        # Calculate similarity of all raw data with all subcentroids
-        similarities = torch.einsum(
-            "nd,kmd->nmk", embeddings_tensor, self.subcentroids_head.prototypes
-        )
+        # Build a set of target (class, subcentroid) pairs for fast lookup
+        topn_pairs = set()
+        for ci, si in zip(
+            topn_class_indices.tolist(), topn_subcentroid_indices.tolist()
+        ):
+            topn_pairs.add((ci, si))
 
-        # Find the nearest subcentroid for each data point across all classes
-        max_similarities, data_subcentroid_indices = torch.max(
-            similarities, dim=1
-        )  # (num_data, num_classes)
-        max_similarity_values, data_class_indices = torch.max(
-            max_similarities, dim=1
-        )  # (num_data)
-
-        # Construct the class index and subcentroid index for the nearest subcentroid of each data point
-        data_nearest_subcentroids = [
-            (
-                data_idx,
-                data_class_indices[data_idx].item(),
-                data_subcentroid_indices[data_idx, data_class_indices[data_idx]].item(),
-            )
-            for data_idx in range(data_class_indices.shape[0])
-        ]
-
-        # Iterate through the target subcentroids and filter the corresponding raw data
+        # Filter matching data points using cached assignments
         matching_data_ids = []
-        for data_idx, class_idx, subcentroid_idx in data_nearest_subcentroids:
-            for topn_class_idx, topn_subcentroid_idx in zip(
-                topn_class_indices, topn_subcentroid_indices
-            ):
-                if (
-                    class_idx == topn_class_idx.item()
-                    and subcentroid_idx == topn_subcentroid_idx.item()
-                ):
-                    matching_data_ids.append(data_idx)
+        for data_idx, (class_idx, subcentroid_idx) in enumerate(data_assignments):
+            if (class_idx, subcentroid_idx) in topn_pairs:
+                matching_data_ids.append(data_idx)
 
         # Return the corresponding data based on the indices
         nearest_data = {

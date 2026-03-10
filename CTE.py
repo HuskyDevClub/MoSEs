@@ -375,18 +375,43 @@ def evaluate_one_text(input_text, input_crit, input_embedding, input_cond, class
             full_constant_result, full_constant_proba, full_count_result, full_count_proba)
 
 def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False):
-    # Load dataset
+    # Load test dataset
     with open(file_path, "r") as f:
         data = json.load(f)
-    
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # --- ONE-TIME SETUP (was repeated per sample in evaluate_one_text) ---
+
+    # 1. Create encoder ONCE (was created per sample at line 278)
+    encoder = TextEncoder(model_name, embedding_type, device=device)
+
+    # 2. Create classifier and load SAR model ONCE
     classifier = TextClassifier(
         model_name=model_name,
         embedding_type=embedding_type,
-        device="cuda"
+        device=device,
     )
     classifier.load_model(model_name=sar_path, class_names_path=class_path)
 
-    # Initialize statistics results
+    # 3. Prepare reference data ONCE (was called per sample via evaluate_one_text -> prepare_data)
+    if not no_router:
+        classifier.prepare_data(datasets_folder)
+        classifier.cache_reference_data()
+
+    # 4. Load full dataset for baselines ONCE (was reloaded per sample at lines 356-364)
+    full_labels_list, full_crits_list = [], []
+    for filename in os.listdir(datasets_folder):
+        if filename.endswith('.json'):
+            category_file = os.path.join(datasets_folder, filename)
+            _, part_labels, part_crits, _ = load_dataset(category_file, encoder, embedding_type)
+            full_labels_list.append(part_labels)
+            full_crits_list.append(part_crits)
+    full_labels = np.concatenate(full_labels_list, axis=0)[::4]
+    full_crits = np.concatenate(full_crits_list, axis=0)[::4]
+    full_constant_threshold = find_constant_threshold(full_labels, full_crits)
+
+    # --- Initialize results ---
     results = {
         "logistic": {"y_true": [], "y_pred": [], "ai_prob": []},
         "xg": {"y_true": [], "y_pred": [], "ai_prob": []},
@@ -396,24 +421,86 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
         "full_count": {"y_true": [], "y_pred": [], "ai_prob": []},
     }
 
-    # Iterate over each term in the dataset
-    c=1
-    for item in data:
+    # --- PER-SAMPLE LOOP (only truly per-sample work) ---
+    for c, item in enumerate(data, 1):
         input_text = item["text"]
         input_crit = np.array(item["crit"])
         input_embedding = np.array(item["embedding"])
         input_cond = np.array(item["cond"])
         true_label = int(np.array(item["label"]))
 
-        # Call evaluate_one_text to get prediction results
-        lr_result, lr_proba, xg_result, xg_proba, constant_result, constant_proba, count_result, count_proba, full_constant_result, full_constant_proba, full_count_result, full_count_proba = evaluate_one_text(
-            input_text, input_crit, input_embedding, input_cond, classifier, datasets_folder=datasets_folder, k_neighbors=k_neighbors,
-            no_condition=no_condition, no_embedding=no_embedding, pca_dim=pca_dim, no_router=no_router
-        )
-        print(f"Finish {c} / {len(data)} test data!")
-        c = c + 1
+        # Router: get nearest neighbors (per-sample, but with cached tensors)
+        if no_router:
+            category = classifier.predict(input_text)[0][0]
+            category_file = os.path.join(datasets_folder, category)
+            embeddings, labels, crits, conds = load_dataset(category_file, encoder, embedding_type)
+        else:
+            nearest_data = classifier.get_nearest_subcentroids(input_text, input_embedding, n=16)
+            embeddings = nearest_data["embeddings"]
+            labels = nearest_data["labels"]
+            crits = nearest_data["crits"]
+            conds = nearest_data["conds"]
 
-        # Save prediction results and true labels
+        # PCA on neighbor embeddings (per-sample since neighbors differ)
+        if not no_embedding:
+            if pca_dim == -1:
+                embeddings_reduced = embeddings
+            else:
+                pca_wrapper = PCAWrapper(n_components=pca_dim)
+                embeddings_reduced = pca_wrapper.train(embeddings)
+
+        # Construct feature vectors
+        if no_embedding:
+            Xs = conds
+        elif no_condition:
+            Xs = embeddings_reduced
+        else:
+            Xs = np.concatenate((conds, embeddings_reduced), axis=1)
+
+        # Split and train models (per-sample since neighbors differ)
+        X_train, X_test, y_train, y_test, crit_train, crit_test = train_test_split(
+            Xs, labels, crits, test_size=0.2, random_state=42
+        )
+
+        model_lr = train_prob_estimator(X_train, X_test, y_train, y_test, crit_train, crit_test,
+                                        estimator="LogisticRegression", class_weight="balanced")
+        model_xg = train_prob_estimator(Xs, X_test, labels, y_test, crits, crit_test,
+                                        estimator="XGBoost", class_weight="balanced")
+
+        # Prepare input vector
+        input_crit_reshaped = input_crit.reshape(1, 1)
+        if not no_embedding:
+            if pca_dim == -1:
+                input_embedding_reduced = input_embedding.reshape(1, -1)
+            else:
+                input_embedding_reduced = pca_wrapper.transform(input_embedding.reshape(1, -1))
+        if no_embedding:
+            input_X = input_cond.reshape(1, -1)
+        elif no_condition:
+            input_X = input_embedding_reduced
+        else:
+            input_X = np.concatenate((input_cond.reshape(1, -1), input_embedding_reduced), axis=1)
+
+        # Predictions
+        lr_result = model_lr.predict(input_X, input_crit_reshaped)[0][0]
+        lr_proba = model_lr.predict_proba(input_X, input_crit_reshaped)
+        xg_result = model_xg.predict(input_X, input_crit_reshaped)[0]
+        xg_proba = model_xg.predict_proba(input_X, input_crit_reshaped)
+
+        # SAR-routed baselines (per-sample using routed neighbors)
+        constant_threshold = find_constant_threshold(labels, crits)
+        constant_result = 1 if input_crit < constant_threshold else 0
+        count_proba = count_probability(input_crit, crits, labels, k=k_neighbors)
+        count_result = 1 if count_proba < 0.5 else 0
+
+        # Full-dataset baselines (threshold computed ONCE above)
+        full_constant_result = 1 if input_crit < full_constant_threshold else 0
+        full_count_proba = count_probability(input_crit, full_crits, full_labels, k=k_neighbors)
+        full_count_result = 1 if full_count_proba < 0.5 else 0
+
+        print(f"Finish {c} / {len(data)} test data!")
+
+        # Save results
         results["logistic"]["y_true"].append(true_label)
         results["logistic"]["y_pred"].append(lr_result)
         results["logistic"]["ai_prob"].append(lr_proba)
@@ -424,7 +511,7 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
 
         results["constant"]["y_true"].append(true_label)
         results["constant"]["y_pred"].append(constant_result)
-        results["constant"]["ai_prob"].append(constant_proba)
+        results["constant"]["ai_prob"].append(0)
 
         results["count"]["y_true"].append(true_label)
         results["count"]["y_pred"].append(count_result)
@@ -432,7 +519,7 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
 
         results["full_constant"]["y_true"].append(true_label)
         results["full_constant"]["y_pred"].append(full_constant_result)
-        results["full_constant"]["ai_prob"].append(full_constant_proba)
+        results["full_constant"]["ai_prob"].append(0)
 
         results["full_count"]["y_true"].append(true_label)
         results["full_count"]["y_pred"].append(full_count_result)
