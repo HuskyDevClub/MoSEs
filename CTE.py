@@ -9,6 +9,11 @@ from sklearn.decomposition import PCA
 import xgboost as xgb
 import json
 import torch
+try:
+    import torch_xla.core.xla_model as xm
+    XLA_AVAILABLE = True
+except ImportError:
+    XLA_AVAILABLE = False
 from transformers import AutoTokenizer, AutoModel
 from FlagEmbedding import BGEM3FlagModel
 import argparse
@@ -380,7 +385,10 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
     with open(file_path, "r") as f:
         data = json.load(f)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if XLA_AVAILABLE:
+        device = xm.xla_device()
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # --- ONE-TIME SETUP (was repeated per sample in evaluate_one_text) ---
 
