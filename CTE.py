@@ -381,6 +381,16 @@ def evaluate_one_text(input_text, input_crit, input_embedding, input_cond, class
             full_constant_result, full_constant_proba, full_count_result, full_count_proba)
 
 def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False, remove_cond_idx=-1):
+    # Handle filenames and check for existing results
+    original_filename = os.path.basename(file_path)
+    filename_without_ext = os.path.splitext(original_filename)[0]
+    result_filename = f"{filename_without_ext}_results.json"
+    full_result_path = os.path.join(result_file_path, result_filename)
+
+    if os.path.exists(full_result_path):
+        print(f"Result file {full_result_path} already exists. Skipping evaluation.")
+        return {}
+
     # Load test dataset
     with open(file_path, "r") as f:
         data = json.load(f)
@@ -554,14 +564,8 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
         else:
             return obj
     
-    # Handle filenames
-    original_filename = os.path.basename(file_path)
-    filename_without_ext = os.path.splitext(original_filename)[0]
-    result_filename = f"{filename_without_ext}_results.json"
-    
     # Ensure directory exists
     os.makedirs(result_file_path, exist_ok=True)
-    full_result_path = os.path.join(result_file_path, result_filename)
     
     # Convert and save results
     converted_results = convert_types(results)
