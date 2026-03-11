@@ -1,3 +1,6 @@
 .*/
 docs/
 **/.DS_Store
+**/__pycache__
+/data/split_datasets_bge_m3_**
+/weights
