@@ -4,3 +4,6 @@ docs/
 **/__pycache__
 /data/split_datasets_bge_m3_**
 /weights
+/logs
+/outputs
+/data/doc4split_low

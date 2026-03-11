@@ -375,7 +375,7 @@ def evaluate_one_text(input_text, input_crit, input_embedding, input_cond, class
             constant_result, constant_proba, count_result, count_proba, 
             full_constant_result, full_constant_proba, full_count_result, full_count_proba)
 
-def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False):
+def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False, remove_cond_idx=-1):
     # Load test dataset
     with open(file_path, "r") as f:
         data = json.load(f)
@@ -442,6 +442,11 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
             labels = nearest_data["labels"]
             crits = nearest_data["crits"]
             conds = nearest_data["conds"]
+
+        # Per-feature ablation: remove a single conditional feature by index
+        if remove_cond_idx >= 0:
+            conds = np.delete(conds, remove_cond_idx, axis=1)
+            input_cond = np.delete(input_cond, remove_cond_idx)
 
         # PCA on neighbor embeddings (per-sample since neighbors differ)
         if not no_embedding:
@@ -603,6 +608,7 @@ def main():
     parser.add_argument('--no_condition', action='store_true', help='Ablation: Do not use condition features.')
     parser.add_argument('--pca_dim', type=int, default=32, help='Ablation: Specify PCA dimension. Set to -1 to disable PCA.')
     parser.add_argument('--no_router', action='store_true', help='Ablation: Do not use nearest neighbor router.')
+    parser.add_argument('--remove_cond_idx', type=int, default=-1, help='Ablation: Remove a single conditional feature by index (0=text_len, 1=logprob_mean, 2=logprob_var, 3=2gram_rep, 4=3gram_rep, 5=ttr). -1 means no removal.')
 
     args = parser.parse_args()
 
@@ -622,7 +628,8 @@ def main():
         no_condition=args.no_condition,
         no_embedding=args.no_embedding,
         pca_dim=args.pca_dim,
-        no_router=args.no_router
+        no_router=args.no_router,
+        remove_cond_idx=args.remove_cond_idx,
     )
 
 if __name__ == "__main__":
