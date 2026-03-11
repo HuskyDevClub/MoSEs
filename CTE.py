@@ -12,6 +12,7 @@ import torch
 from transformers import AutoTokenizer, AutoModel
 from FlagEmbedding import BGEM3FlagModel
 import argparse
+from tqdm import tqdm
 
 from SAR import TextClassifier
 
@@ -422,7 +423,8 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
     }
 
     # --- PER-SAMPLE LOOP (only truly per-sample work) ---
-    for c, item in enumerate(data, 1):
+    test_name = os.path.basename(file_path)
+    for c, item in enumerate(tqdm(data, desc=f"CTE [{test_name}]", unit="sample"), 1):
         input_text = item["text"]
         input_crit = np.array(item["crit"])
         input_embedding = np.array(item["embedding"])
@@ -497,8 +499,6 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
         full_constant_result = 1 if input_crit < full_constant_threshold else 0
         full_count_proba = count_probability(input_crit, full_crits, full_labels, k=k_neighbors)
         full_count_result = 1 if full_count_proba < 0.5 else 0
-
-        print(f"Finish {c} / {len(data)} test data!")
 
         # Save results
         results["logistic"]["y_true"].append(true_label)
