@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, AutoModel
 from FlagEmbedding import BGEM3FlagModel
 import argparse
 from tqdm import tqdm
+from joblib import Parallel, delayed
 
 from SAR import TextClassifier
 
@@ -96,7 +97,7 @@ def load_dataset(file_path, encoder, embedding_type="encode"):
 
     return np.array(embeddings), np.array(labels), np.array(crits), np.array(conds)
 
-def find_constant_threshold(y_train, crit_train):
+def find_constant_threshold(y_train, crit_train, verbose=False):
     # Calculate ROC curve
     fpr, tpr, thresholds = roc_curve(y_train, -crit_train)  # negative for confidence on human
 
@@ -105,7 +106,8 @@ def find_constant_threshold(y_train, crit_train):
     best_index = youden_j.argmax()
     best_threshold = -thresholds[best_index]  # reverse back to positive
 
-    print(f"Constant optimal threshold found: {best_threshold} with Youden's J statistic: {youden_j[best_index]}")
+    if verbose:
+        print(f"Constant optimal threshold found: {best_threshold} with Youden's J statistic: {youden_j[best_index]}")
     return best_threshold
 
 def count_probability(input_crit, crit_train, labels_train, k=10):
@@ -440,9 +442,10 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
         "full_count": {"y_true": [], "y_pred": [], "ai_prob": []},
     }
 
-    # --- PER-SAMPLE LOOP (only truly per-sample work) ---
+    # --- PHASE 1: Sequential router queries (GPU-bound) ---
     test_name = os.path.basename(file_path)
-    for c, item in enumerate(tqdm(data, desc=f"CTE [{test_name}]", unit="sample"), 1):
+    routed_data = []
+    for item in tqdm(data, desc=f"Routing [{test_name}]", unit="sample"):
         input_text = item["text"]
         input_crit = np.array(item["crit"])
         input_embedding = np.array(item["embedding"])
@@ -461,7 +464,30 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
             crits = nearest_data["crits"]
             conds = nearest_data["conds"]
 
-        # Per-feature ablation: remove a single conditional feature by index
+        routed_data.append({
+            "input_crit": input_crit,
+            "input_embedding": input_embedding,
+            "input_cond": input_cond,
+            "true_label": true_label,
+            "embeddings": embeddings,
+            "labels": labels,
+            "crits": crits,
+            "conds": conds,
+        })
+
+    # --- PHASE 2: Parallel CPU-bound model training & prediction ---
+    def _process_sample(sample, remove_cond_idx, no_embedding, no_condition,
+                        pca_dim, k_neighbors, full_constant_threshold,
+                        full_crits, full_labels):
+        input_crit = sample["input_crit"]
+        input_embedding = sample["input_embedding"]
+        input_cond = sample["input_cond"]
+        true_label = sample["true_label"]
+        embeddings = sample["embeddings"]
+        labels = sample["labels"]
+        crits = sample["crits"]
+        conds = sample["conds"]
+
         if remove_cond_idx >= 0:
             conds = np.delete(conds, remove_cond_idx, axis=1)
             input_cond = np.delete(input_cond, remove_cond_idx)
@@ -523,30 +549,52 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
         full_count_proba = count_probability(input_crit, full_crits, full_labels, k=k_neighbors)
         full_count_result = 1 if full_count_proba < 0.5 else 0
 
-        # Save results
-        results["logistic"]["y_true"].append(true_label)
-        results["logistic"]["y_pred"].append(lr_result)
-        results["logistic"]["ai_prob"].append(lr_proba)
+        return {
+            "true_label": true_label,
+            "lr_result": lr_result, "lr_proba": lr_proba,
+            "xg_result": xg_result, "xg_proba": xg_proba,
+            "constant_result": constant_result,
+            "count_result": count_result, "count_proba": count_proba,
+            "full_constant_result": full_constant_result,
+            "full_count_result": full_count_result, "full_count_proba": full_count_proba,
+        }
 
-        results["xg"]["y_true"].append(true_label)
-        results["xg"]["y_pred"].append(xg_result)
-        results["xg"]["ai_prob"].append(xg_proba)
+    sample_results = Parallel(n_jobs=-1, prefer="threads")(
+        delayed(_process_sample)(
+            sample, remove_cond_idx, no_embedding, no_condition,
+            pca_dim, k_neighbors, full_constant_threshold,
+            full_crits, full_labels
+        )
+        for sample in tqdm(routed_data, desc=f"CTE [{test_name}]", unit="sample")
+    )
 
-        results["constant"]["y_true"].append(true_label)
-        results["constant"]["y_pred"].append(constant_result)
+    del routed_data  # free neighbor arrays
+
+    # --- Collect results ---
+    for r in sample_results:
+        results["logistic"]["y_true"].append(r["true_label"])
+        results["logistic"]["y_pred"].append(r["lr_result"])
+        results["logistic"]["ai_prob"].append(r["lr_proba"])
+
+        results["xg"]["y_true"].append(r["true_label"])
+        results["xg"]["y_pred"].append(r["xg_result"])
+        results["xg"]["ai_prob"].append(r["xg_proba"])
+
+        results["constant"]["y_true"].append(r["true_label"])
+        results["constant"]["y_pred"].append(r["constant_result"])
         results["constant"]["ai_prob"].append(0)
 
-        results["count"]["y_true"].append(true_label)
-        results["count"]["y_pred"].append(count_result)
-        results["count"]["ai_prob"].append(count_proba)
+        results["count"]["y_true"].append(r["true_label"])
+        results["count"]["y_pred"].append(r["count_result"])
+        results["count"]["ai_prob"].append(r["count_proba"])
 
-        results["full_constant"]["y_true"].append(true_label)
-        results["full_constant"]["y_pred"].append(full_constant_result)
+        results["full_constant"]["y_true"].append(r["true_label"])
+        results["full_constant"]["y_pred"].append(r["full_constant_result"])
         results["full_constant"]["ai_prob"].append(0)
 
-        results["full_count"]["y_true"].append(true_label)
-        results["full_count"]["y_pred"].append(full_count_result)
-        results["full_count"]["ai_prob"].append(full_count_proba)
+        results["full_count"]["y_true"].append(r["true_label"])
+        results["full_count"]["y_pred"].append(r["full_count_result"])
+        results["full_count"]["ai_prob"].append(r["full_count_proba"])
 
     # Save results to file
     # Conversion function for numpy types
