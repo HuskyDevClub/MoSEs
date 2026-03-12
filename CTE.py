@@ -382,7 +382,7 @@ def evaluate_one_text(input_text, input_crit, input_embedding, input_cond, class
             constant_result, constant_proba, count_result, count_proba, 
             full_constant_result, full_constant_proba, full_count_result, full_count_proba)
 
-def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False, remove_cond_idx=-1):
+def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="encode", model_name="BAAI/bge-m3", sar_path=None, class_path=None, k_neighbors=100, no_condition=False, no_embedding=False, pca_dim=32, no_router=False, remove_cond_idx=-1, n_jobs=-1):
     # Handle filenames and check for existing results
     original_filename = os.path.basename(file_path)
     filename_without_ext = os.path.splitext(original_filename)[0]
@@ -559,14 +559,24 @@ def evaluate_file(file_path, result_file_path, datasets_folder, embedding_type="
             "full_count_result": full_count_result, "full_count_proba": full_count_proba,
         }
 
-    sample_results = Parallel(n_jobs=-1, prefer="threads")(
-        delayed(_process_sample)(
-            sample, remove_cond_idx, no_embedding, no_condition,
-            pca_dim, k_neighbors, full_constant_threshold,
-            full_crits, full_labels
+    if n_jobs != 1:
+        sample_results = Parallel(n_jobs=n_jobs, prefer="processes")(
+            delayed(_process_sample)(
+                sample, remove_cond_idx, no_embedding, no_condition,
+                pca_dim, k_neighbors, full_constant_threshold,
+                full_crits, full_labels
+            )
+            for sample in tqdm(routed_data, desc=f"CTE [{test_name}]", unit="sample")
         )
-        for sample in tqdm(routed_data, desc=f"CTE [{test_name}]", unit="sample")
-    )
+    else:
+        sample_results = [
+            _process_sample(
+                sample, remove_cond_idx, no_embedding, no_condition,
+                pca_dim, k_neighbors, full_constant_threshold,
+                full_crits, full_labels
+            )
+            for sample in tqdm(routed_data, desc=f"CTE [{test_name}]", unit="sample")
+        ]
 
     del routed_data  # free neighbor arrays
 
@@ -669,6 +679,7 @@ def main():
     parser.add_argument('--pca_dim', type=int, default=32, help='Ablation: Specify PCA dimension. Set to -1 to disable PCA.')
     parser.add_argument('--no_router', action='store_true', help='Ablation: Do not use nearest neighbor router.')
     parser.add_argument('--remove_cond_idx', type=int, default=-1, help='Ablation: Remove a single conditional feature by index (0=text_len, 1=logprob_mean, 2=logprob_var, 3=2gram_rep, 4=3gram_rep, 5=ttr). -1 means no removal.')
+    parser.add_argument('--n_jobs', type=int, default=-1, help='Number of parallel jobs to use for processing samples. -1 means use all processors. Default is 1 (sequential).')
 
     args = parser.parse_args()
 
@@ -690,6 +701,7 @@ def main():
         pca_dim=args.pca_dim,
         no_router=args.no_router,
         remove_cond_idx=args.remove_cond_idx,
+        n_jobs=args.n_jobs,
     )
 
 if __name__ == "__main__":
