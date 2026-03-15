@@ -1,6 +1,22 @@
 <h1>MoSEs: Uncertainty-Aware AI-Generated Text Detection via Mixture of Stylistics Experts with Conditional Thresholds</h1>
 
-
+> **Note:** This repository contains the official author implementation of the MoSEs paper ([Wu et al., 2025](https://aclanthology.org/2025.emnlp-main.294/)). The notebook `cse517_reproduction.ipynb` is created for a comprehensive reproducibility study and is **not part of the original paper code**. All other code and resources are provided by the paper authors. Minor optimizations have been made to the original code with the intent to preserve functionality while improving computational efficiency (e.g., parallelization of evaluation loops, caching mechanisms).
+>
+> **Original Repository:** [creator-xi/MoSEs](https://github.com/creator-xi/MoSEs)
+>
+> **About the Reproduction Notebook:** The `cse517_reproduction.ipynb` notebook is a reproducibility study that validates all four main claims from the original paper by orchestrating the complete MoSEs pipeline:
+>
+> **Reproduction Coverage:**
+>
+> - Tested across three score models: RoBERTa-base, Fast-DetectGPT, and LastDE
+> - Eight datasets spanning news, debates, stories, comments, scientific articles, reviews
+> - Automated dataset preparation and processing (both main and low-resource configurations)
+> - Training Stylistics-Aware Router (SAR) on 8-class Stylistics Reference Repository
+> - Conditional Threshold Estimator (CTE) evaluation and metric computation
+> - Full ablation studies (SAR effectiveness and conditional feature importance)
+> - Additional experiments: reference set size sensitivity analysis and text-length stratified evaluation
+> - Colab-optimized with automatic result archiving and caching for efficiency
+>
 
 ## 🖼️ Framework
 
@@ -15,22 +31,74 @@ The figure below provides an overview of the MoSEs detection framework. First, w
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/creator-xi/MoSEs.git
+    git clone https://github.com/HuskyDevClub/MoSEs
     cd MoSEs
     ```
 
-2.  **Create a Conda environment and install dependencies:**
+2.  **[Optional] Create a Conda environment and install dependencies:**
+
+    This step is only needed if you plan to run scripts manually or locally. If you're using the reproduction notebook on Google Colab, you can skip this step as Colab handles the environment automatically.
+
     ```bash
-    conda create -n moses python=3.10
+    conda create -n moses python=3.12
     conda activate moses
+    pip install -r requirements.txt
+    ```
+
+    Alternatively, if you don't use Conda, you can install dependencies directly with:
+    ```bash
     pip install -r requirements.txt
     ```
 
 ---
 
-## 🚀 Quick Start
+## 📓 Running the Reproduction Notebook
 
-This section provides a step-by-step guide to reproduce the results presented in our paper.
+The `cse517_reproduction.ipynb` notebook provides the easiest way to reproduce all results from the paper. It orchestrates the entire pipeline in a single, self-contained workflow.
+
+### Quick Start with the Notebook
+
+**Option 1: Run on Google Colab (Recommended)**
+
+Open the notebook directly in Colab by clicking the "Open in Colab" link at the top of the notebook, which will handle GPU allocation and environment setup automatically.
+
+**Option 2: Run Locally**
+
+1. Ensure you have completed the Setup section above (conda environment with dependencies installed)
+2. Download or access the `cse517_reproduction.ipynb` notebook
+3. Start Jupyter and open the notebook:
+   ```bash
+   jupyter notebook cse517_reproduction.ipynb
+   ```
+4. Run all cells sequentially (Kernel → Run All, or manually step through cells)
+
+### What the Notebook Does
+
+The notebook automates the complete MoSEs pipeline:
+
+1. **Data Staging**: Downloads and prepares all datasets (8 datasets, both main and low-resource configurations)
+2. **SAR Training**: Trains the Stylistics-Aware Router on the full 8-class Stylistics Reference Repository
+3. **CTE Evaluation**: Evaluates all three score models (RoBERTa-base, Fast-DetectGPT, LastDE) using the Conditional Threshold Estimator
+4. **Results Generation**: Computes metrics and generates result tables matching the paper:
+   - Main results (Table 1, 2, 3) with accuracy and F1-score across all datasets
+   - Ablation studies (Table 4: SAR effectiveness, Table 5: conditional feature importance)
+   - Additional analyses: reference set size sensitivity and text-length stratified evaluation
+5. **Result Export**: Automatically archives and displays all results in a summary table
+
+### Expected Output
+
+Upon completion, the notebook will display:
+- A comprehensive metrics table showing ~11% accuracy improvement over static thresholds
+- Ablation study results confirming the gains from SAR and conditional features
+- Statistical significance testing (paired t-tests) validating results match the original paper
+
+All intermediate results and logs are saved to the `logs/` directory for further inspection.
+
+---
+
+## 🚀 Manual Reproduction (Advanced)
+
+For those who prefer fine-grained control or want to understand each step in detail, this section provides step-by-step instructions for running the pipeline manually.
 
 ### Step 1: Prepare Datasets
 
@@ -81,8 +149,9 @@ The script will iterate through the test files, print the evaluation metrics (Ac
 
 ## ✍️ Citation
 
-If you find our work useful for your research, please cite our paper:
+If you find this reproduction study or the original work helpful, please cite both the original paper and our reproducibility study:
 
+**Original Paper:**
 ```bibtex
 @inproceedings{wu2025moses,
   title={MoSEs: Uncertainty-Aware AI-Generated Text Detection via Mixture of Stylistics Experts with Conditional Thresholds},
@@ -90,5 +159,16 @@ If you find our work useful for your research, please cite our paper:
   booktitle={Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing},
   year={2025},
   publisher={Association for Computational Linguistics}
+}
+```
+
+**Reproduction Study:**
+```bibtex
+@misc{lin2026moses_reproduction,
+  title={Reproducibility Study of MoSEs: Uncertainty-Aware AI-Generated Text Detection},
+  author={Lin, Wynter and Huang, Ziqian and He, Yuxiang},
+  year={2026},
+  note={CSE 517 course project, University of Washington},
+  url={https://github.com/HuskyDevClub/MoSEs}
 }
 ```
